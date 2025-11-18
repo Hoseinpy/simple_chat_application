@@ -1,0 +1,6 @@
+-- Add migration script here
+CREATE TABLE IF NOT EXISTS room (
+    id INTEGER PRIMARY KEY GENERATED ALWAYS AS IDENTITY,
+    uuid UUID NOT NULL UNIQUE,
+    created_at TIMESTAMP DEFAULT (NOW() AT TIME ZONE 'Asia/Tehran')
+);
