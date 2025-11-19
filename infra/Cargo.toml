@@ -1,0 +1,13 @@
+[package]
+name = "infra"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+sqlx = { version = "0.8.6", features = ["postgres", "runtime-tokio", "tls-native-tls", "chrono", "uuid"] }
+chrono = "0.4.42"
+env_logger = "0.11.8"
+log = "0.4.28"
+redis = "0.32.7"
+uuid = { version = "1.18.1", features = ["v4"] }
+shared = { path = "../shared" }

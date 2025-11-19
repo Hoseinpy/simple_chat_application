@@ -1,8 +1,7 @@
 use std::{env, time::Duration};
 
+use shared::types::DefaultError;
 use sqlx::{PgPool, postgres::PgPoolOptions};
-
-use crate::types::DefaultError;
 
 pub mod models;
 
