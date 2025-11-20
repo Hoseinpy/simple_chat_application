@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use axum::{
     Json, Router,
     http::StatusCode,
@@ -7,7 +5,7 @@ use axum::{
     routing::{get, post},
 };
 use serde_json::json;
-use sqlx::PgPool;
+use shared::models::AppState;
 
 use crate::handlers::{
     common::{handle_health, handle_version},
@@ -27,23 +25,6 @@ impl ApiResponse {
     ) -> impl IntoResponse {
         let body = Json(json!({ "success": success, "data": data }));
         (status_code, body)
-    }
-}
-
-// TODO: remove allow attribute after use in some place
-#[derive(Clone)]
-#[allow(dead_code)]
-pub struct AppState {
-    db_pool: Arc<PgPool>,
-    redis_client: redis::Client,
-}
-
-impl AppState {
-    pub fn new(db_pool: Arc<PgPool>, redis_client: redis::Client) -> Self {
-        Self {
-            db_pool,
-            redis_client,
-        }
     }
 }
 

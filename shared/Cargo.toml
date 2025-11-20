@@ -5,3 +5,5 @@ edition = "2024"
 
 [dependencies]
 uuid = { version = "1.18.1", features = ["v4"] }
+sqlx = { version = "0.8.6", features = ["postgres", "runtime-tokio", "tls-native-tls", "chrono", "uuid"] }
+redis = { version = "0.32.7", features = ["tokio-comp"] }

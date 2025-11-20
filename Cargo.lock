@@ -1564,18 +1564,14 @@ name = "server"
 version = "0.1.0"
 dependencies = [
  "axum",
- "chrono",
  "dotenvy",
- "env_logger",
  "infra",
  "log",
  "redis",
  "serde",
  "serde_json",
  "shared",
- "sqlx",
  "tokio",
- "uuid",
 ]
 
 [[package]]
@@ -1610,6 +1606,8 @@ dependencies = [
 name = "shared"
 version = "0.1.0"
 dependencies = [
+ "redis",
+ "sqlx",
  "uuid",
 ]
 
