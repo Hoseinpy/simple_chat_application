@@ -2,14 +2,14 @@ use axum::{
     Json, Router,
     http::StatusCode,
     response::IntoResponse,
-    routing::{get, post},
+    routing::{any, get, post},
 };
 use serde_json::json;
 use shared::models::AppState;
 
 use crate::handlers::{
     common::{handle_health, handle_version},
-    room::handle_create_room,
+    room::{handle_connect_room, handle_create_room},
 };
 
 mod common;
@@ -34,6 +34,10 @@ pub async fn init_app(app_state: AppState) -> Router {
         .route("/health", get(handle_health))
         .route(
             "/room/create",
-            post(handle_create_room).with_state(app_state),
+            post(handle_create_room).with_state(app_state.clone()),
+        )
+        .route(
+            "/room/{uuid}",
+            any(handle_connect_room).with_state(app_state),
         )
 }

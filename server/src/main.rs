@@ -1,11 +1,11 @@
 // TODO: remove unused crates in cargo.tom
 
-use std::{process, sync::Arc};
+use std::{collections::HashMap, process, sync::Arc};
 
 use dotenvy::dotenv;
 use infra::{cache::get_redis_client, db::create_pool, logging::init_logger};
 use shared::models::AppState;
-use tokio::net::TcpListener;
+use tokio::{net::TcpListener, sync::Mutex};
 
 use crate::handlers::init_app;
 
@@ -27,7 +27,12 @@ async fn main() {
         process::exit(1)
     }));
 
-    let app = init_app(AppState::new(db_pool, redis_client)).await;
+    let app = init_app(AppState::new(
+        db_pool,
+        redis_client,
+        Arc::new(Mutex::new(HashMap::new())),
+    ))
+    .await;
 
     let listener = TcpListener::bind("0.0.0.0:3000")
         .await
