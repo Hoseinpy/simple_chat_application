@@ -67,6 +67,7 @@ pub async fn handle_connect_room(
     ws: WebSocketUpgrade,
     Path(uuid): Path<String>,
     State(app_state): State<AppState>,
+    headers: HeaderMap,
 ) -> Response {
     // validate uuid
     let parsed_uuid = match Uuid::parse_str(&uuid) {
@@ -116,13 +117,17 @@ pub async fn handle_connect_room(
         }
     }
 
-    ws.on_upgrade(move |socket| connect_room(socket, parsed_uuid, app_state, room_id))
+    ws.on_upgrade(move |socket| connect_room(socket, parsed_uuid, app_state, room_id, headers))
 }
 
-// TODO: add rate-limit for send message
-// TODO: check if connect room system is wrong fix it
 // TODO: refactor it
-async fn connect_room(socket: WebSocket, uuid: Uuid, app_state: AppState, room_id: i32) {
+async fn connect_room(
+    socket: WebSocket,
+    uuid: Uuid,
+    app_state: AppState,
+    room_id: i32,
+    headers: HeaderMap,
+) {
     let (mut socket_send, mut socket_recv) = socket.split();
     let tx = {
         let mut map = app_state.channels.lock().await;
@@ -131,16 +136,16 @@ async fn connect_room(socket: WebSocket, uuid: Uuid, app_state: AppState, room_i
             .clone()
     };
     let mut rx = tx.subscribe();
+
     let random_name = format!(
         "anonymous_{}",
         Alphanumeric.sample_string(&mut rand::rng(), 10)
     );
+    let join_message = format!("user {} joined to room", &random_name);
+    let leave_message = format!("user {} leave the room", &random_name);
 
-    let _ = tx.send(Json(Value::String(format!(
-        "user {} joined to room",
-        &random_name
-    ))));
-
+    // setup
+    let _ = tx.send(Json(Value::String(join_message)));
     for message in Message::read(Arc::clone(&app_state.db_pool), room_id, 100)
         .await
         .unwrap_or(Vec::new())
@@ -164,18 +169,25 @@ async fn connect_room(socket: WebSocket, uuid: Uuid, app_state: AppState, room_i
 
     let mut recv_task = tokio::spawn(async move {
         while let Some(Ok(msg)) = socket_recv.next().await {
+            if !RateLimiter::run(&headers, 10, 60, Arc::clone(&app_state.redis_client)).await {
+                // let _ = socket_send.send(WsMessage::text(String::from(
+                //     "you are limited. please try after 60 seconds",
+                // )));
+                continue;
+            };
             match msg {
                 WsMessage::Text(m) => {
-                    let msg = m.to_string();
-                    let _ =
-                        Message::create(Arc::clone(&app_state.db_pool), msg.clone(), room_id).await;
-                    let _ = tx.send(Json(json!({ "user": random_name, "message": msg })));
+                    let message = Json(json!({ "user": random_name, "message": m.to_string() }));
+                    let _ = Message::create(
+                        Arc::clone(&app_state.db_pool),
+                        message.to_string(),
+                        room_id,
+                    )
+                    .await;
+                    let _ = tx.send(message);
                 }
                 WsMessage::Close(_) => {
-                    let _ = tx.send(Json(Value::String(format!(
-                        "user {} leave the room",
-                        &random_name
-                    ))));
+                    let _ = tx.send(Json(Value::String(leave_message.clone())));
                 }
                 _ => (),
             }

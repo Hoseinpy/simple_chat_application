@@ -78,12 +78,17 @@ impl Message {
         .await?;
         Ok(record)
     }
-    pub async fn read(db_pool: Arc<PgPool>, room_id: i32, limit: i32) -> Result<Vec<Message>, DefaultError> {
-        let records = sqlx::query_as::<_, Message>("SELECT * FROM message WHERE room_id = $1 LIMIT $2")
-            .bind(room_id)
-            .bind(limit)
-            .fetch_all(&*db_pool)
-            .await?;
+    pub async fn read(
+        db_pool: Arc<PgPool>,
+        room_id: i32,
+        limit: i32,
+    ) -> Result<Vec<Message>, DefaultError> {
+        let records =
+            sqlx::query_as::<_, Message>("SELECT * FROM message WHERE room_id = $1 LIMIT $2")
+                .bind(room_id)
+                .bind(limit)
+                .fetch_all(&*db_pool)
+                .await?;
 
         Ok(records)
     }
