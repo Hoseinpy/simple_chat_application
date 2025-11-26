@@ -1,19 +1,27 @@
 use std::sync::Arc;
 
 use axum::{
-    extract::{Path, State, WebSocketUpgrade, ws::WebSocket},
+    Json,
+    extract::{
+        Path, State, WebSocketUpgrade,
+        ws::{Message as WsMessage, WebSocket},
+    },
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
 };
+use futures_util::{sink::SinkExt, stream::StreamExt};
+use rand::distr::{Alphanumeric, SampleString};
 use redis::AsyncTypedCommands;
+use serde_json::{Value, json};
 use shared::helpers::generate_uuid_v4;
+use tokio::sync::broadcast;
 use uuid::Uuid;
 
 use crate::{
     handlers::{ApiResponse, AppState},
     rate_limiter::RateLimiter,
 };
-use infra::db::models::{CRUD, Room};
+use infra::db::models::{Message, Room};
 
 pub async fn handle_create_room(
     State(app_state): State<AppState>,
@@ -67,20 +75,34 @@ pub async fn handle_connect_room(
             return StatusCode::NOT_FOUND.into_response();
         }
     };
+    let mut room_id = 0;
+    let cache_key = format!("room:{}", uuid);
 
     match app_state
         .redis_client
         .get_multiplexed_async_connection()
         .await
     {
-        Ok(mut conn) => match conn.exists(format!("room:{}", uuid)).await {
-            Ok(exist) => {
-                if !exist
-                    && let Ok(v) =
-                        Room::read(Arc::clone(&app_state.db_pool), Some(parsed_uuid)).await
-                    && v.is_empty()
-                {
-                    return StatusCode::NOT_FOUND.into_response();
+        Ok(mut conn) => match conn.exists(&cache_key).await {
+            Ok(true) => {
+                let c_room =
+                    match Room::create(Arc::clone(&app_state.db_pool), Some(parsed_uuid)).await {
+                        Ok(r) => r,
+                        Err(e) => {
+                            log::error!("failed to check room exists: {e}");
+                            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+                        }
+                    };
+                room_id = c_room.get_id();
+                let _ = conn.del(cache_key).await;
+            }
+            Ok(false) => {
+                if let Ok(r) = Room::read(Arc::clone(&app_state.db_pool), Some(parsed_uuid)).await {
+                    if r.is_empty() {
+                        return StatusCode::NOT_FOUND.into_response();
+                    } else {
+                        room_id = r[0].get_id()
+                    }
                 }
             }
             Err(e) => {
@@ -93,7 +115,75 @@ pub async fn handle_connect_room(
             return StatusCode::INTERNAL_SERVER_ERROR.into_response();
         }
     }
-    ws.on_upgrade(move |socket| connect_room(socket, parsed_uuid, app_state))
+
+    ws.on_upgrade(move |socket| connect_room(socket, parsed_uuid, app_state, room_id))
 }
 
-async fn connect_room(mut socket: WebSocket, uuid: Uuid, app_state: AppState) {}
+// TODO: add rate-limit for send message
+// TODO: check if connect room system is wrong fix it
+// TODO: refactor it
+async fn connect_room(socket: WebSocket, uuid: Uuid, app_state: AppState, room_id: i32) {
+    let (mut socket_send, mut socket_recv) = socket.split();
+    let tx = {
+        let mut map = app_state.channels.lock().await;
+        map.entry(uuid)
+            .or_insert_with(|| broadcast::channel(100).0)
+            .clone()
+    };
+    let mut rx = tx.subscribe();
+    let random_name = format!(
+        "anonymous_{}",
+        Alphanumeric.sample_string(&mut rand::rng(), 10)
+    );
+
+    let _ = tx.send(Json(Value::String(format!(
+        "user {} joined to room",
+        &random_name
+    ))));
+
+    for message in Message::read(Arc::clone(&app_state.db_pool), room_id, 100)
+        .await
+        .unwrap_or(Vec::new())
+    {
+        let _ = socket_send
+            .send(WsMessage::Text(message.get_message().into()))
+            .await;
+    }
+
+    let mut send_task = tokio::spawn(async move {
+        while let Ok(msg) = rx.recv().await {
+            if socket_send
+                .send(WsMessage::text(msg.to_string()))
+                .await
+                .is_err()
+            {
+                break;
+            }
+        }
+    });
+
+    let mut recv_task = tokio::spawn(async move {
+        while let Some(Ok(msg)) = socket_recv.next().await {
+            match msg {
+                WsMessage::Text(m) => {
+                    let msg = m.to_string();
+                    let _ =
+                        Message::create(Arc::clone(&app_state.db_pool), msg.clone(), room_id).await;
+                    let _ = tx.send(Json(json!({ "user": random_name, "message": msg })));
+                }
+                WsMessage::Close(_) => {
+                    let _ = tx.send(Json(Value::String(format!(
+                        "user {} leave the room",
+                        &random_name
+                    ))));
+                }
+                _ => (),
+            }
+        }
+    });
+
+    tokio::select! {
+        _ = &mut send_task => recv_task.abort(),
+        _ = &mut recv_task => send_task.abort(),
+    }
+}

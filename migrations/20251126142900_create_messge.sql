@@ -1,0 +1,6 @@
+-- Add migration script here
+CREATE TABLE IF NOT EXISTS message (
+    id INTEGER PRIMARY KEY GENERATED ALWAYS AS IDENTITY,
+    message TEXT NOT NULL,
+    room_id INTEGER REFERENCES room(id)
+);
