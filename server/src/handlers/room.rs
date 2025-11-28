@@ -1,18 +1,18 @@
 use std::sync::Arc;
 
 use axum::{
-    Json,
     extract::{
-        Path, State, WebSocketUpgrade,
         ws::{Message as WsMessage, WebSocket},
+        Path, State, WebSocketUpgrade,
     },
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
+    Json,
 };
 use futures_util::{sink::SinkExt, stream::StreamExt};
 use rand::distr::{Alphanumeric, SampleString};
 use redis::AsyncTypedCommands;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use shared::helpers::generate_uuid_v4;
 use tokio::sync::broadcast;
 use uuid::Uuid;
@@ -63,6 +63,7 @@ pub async fn handle_create_room(
     }
 }
 
+// TODO: if possible write some test for this endpoint
 pub async fn handle_connect_room(
     ws: WebSocketUpgrade,
     Path(uuid): Path<String>,
@@ -197,5 +198,55 @@ async fn connect_room(
     tokio::select! {
         _ = &mut send_task => recv_task.abort(),
         _ = &mut recv_task => send_task.abort(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::test_utils::{setup_redis_client, setup_test_server};
+    use redis::AsyncCommands;
+    use serde_json::Value;
+    use uuid::Uuid;
+
+    #[tokio::test]
+    async fn test_handle_create_room_successfully() {
+        let server = setup_test_server().await;
+
+        let response = server.post("/room/create").await;
+        assert_eq!(response.status_code(), 200);
+
+        let created_uuid =
+            Uuid::parse_str(response.json::<Value>()["data"].as_str().unwrap()).unwrap();
+        let redis_client = setup_redis_client();
+        let mut conn = redis_client
+            .get_multiplexed_async_connection()
+            .await
+            .unwrap();
+
+        let cache_key = format!("room:{}", created_uuid);
+        let cache: Option<String> = conn.get(&cache_key).await.unwrap();
+        assert!(cache.is_some());
+
+        conn.del::<_, ()>(cache_key).await.unwrap();
+    }
+    #[tokio::test]
+    async fn test_handle_create_room_to_many_requests_error() {
+        let server = setup_test_server().await;
+
+        // fake rate limit
+        let redis_client = setup_redis_client();
+        let mut conn = redis_client
+            .get_multiplexed_async_connection()
+            .await
+            .unwrap();
+        conn.set_ex::<_, _, ()>("rate_limiter:127.0.0.10", "0", 10)
+            .await
+            .unwrap();
+
+        let response = server
+            .post("/room/create")
+            .add_header("x-forwarded-for", "127.0.0.10")
+            .await;
+        assert_eq!(response.status_code(), 429)
     }
 }
