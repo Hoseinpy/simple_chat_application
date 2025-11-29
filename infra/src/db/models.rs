@@ -64,6 +64,9 @@ impl Message {
     pub fn get_message(&self) -> String {
         self.message.clone()
     }
+    pub fn get_room_id(&self) -> i32 {
+        self.room_id
+    }
     pub async fn create(
         db_pool: Arc<PgPool>,
         message: String,

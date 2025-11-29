@@ -13,15 +13,12 @@ mod handlers;
 mod rate_limiter;
 mod utils;
 
-#[cfg(test)]
-mod test_utils;
-
 #[tokio::main]
 async fn main() {
     dotenv().ok();
     init_logger();
 
-    let db_pool = Arc::new(create_pool(false).await.unwrap_or_else(|error| {
+    let db_pool = Arc::new(create_pool().await.unwrap_or_else(|error| {
         log::error!("failed to create db pool: {error}");
         process::exit(1)
     }));
