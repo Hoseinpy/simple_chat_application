@@ -1,18 +1,18 @@
 use std::sync::Arc;
 
 use axum::{
+    Json,
     extract::{
-        ws::{Message as WsMessage, WebSocket},
         Path, State, WebSocketUpgrade,
+        ws::{Message as WsMessage, WebSocket},
     },
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
-    Json,
 };
 use futures_util::{sink::SinkExt, stream::StreamExt};
 use rand::distr::{Alphanumeric, SampleString};
 use redis::AsyncTypedCommands;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use shared::helpers::generate_uuid_v4;
 use tokio::sync::broadcast;
 use uuid::Uuid;
@@ -203,21 +203,22 @@ async fn connect_room(
 
 #[cfg(test)]
 mod tests {
-    use crate::test_utils::{setup_redis_client, setup_test_server};
+    use crate::test_utils::get_test_server;
+    use infra::cache::get_redis_client;
     use redis::AsyncCommands;
     use serde_json::Value;
     use uuid::Uuid;
 
     #[tokio::test]
     async fn test_handle_create_room_successfully() {
-        let server = setup_test_server().await;
+        let server = get_test_server().await;
 
         let response = server.post("/room/create").await;
         assert_eq!(response.status_code(), 200);
 
         let created_uuid =
             Uuid::parse_str(response.json::<Value>()["data"].as_str().unwrap()).unwrap();
-        let redis_client = setup_redis_client();
+        let redis_client = get_redis_client().unwrap();
         let mut conn = redis_client
             .get_multiplexed_async_connection()
             .await
@@ -231,10 +232,10 @@ mod tests {
     }
     #[tokio::test]
     async fn test_handle_create_room_to_many_requests_error() {
-        let server = setup_test_server().await;
+        let server = get_test_server().await;
 
         // fake rate limit
-        let redis_client = setup_redis_client();
+        let redis_client = get_redis_client().unwrap();
         let mut conn = redis_client
             .get_multiplexed_async_connection()
             .await

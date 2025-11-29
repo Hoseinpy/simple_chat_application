@@ -4,9 +4,7 @@ use sqlx::PgPool;
 
 use crate::types::Channel;
 
-// TODO: remove allow attribute after use in some place
 #[derive(Clone)]
-#[allow(dead_code)]
 pub struct AppState {
     pub db_pool: Arc<PgPool>,
     pub redis_client: Arc<redis::Client>,

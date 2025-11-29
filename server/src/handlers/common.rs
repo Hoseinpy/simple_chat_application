@@ -13,11 +13,11 @@ pub async fn handle_health() -> StatusCode {
 
 #[cfg(test)]
 mod tests {
-    use crate::test_utils::setup_test_server;
+    use crate::test_utils::get_test_server;
 
     #[tokio::test]
     async fn test_handle_version() {
-        let server = setup_test_server().await;
+        let server = get_test_server().await;
 
         let response = server.get("/version").await;
 
@@ -25,7 +25,7 @@ mod tests {
     }
     #[tokio::test]
     async fn test_handle_health() {
-        let server = setup_test_server().await;
+        let server = get_test_server().await;
 
         let response = server.get("/health").await;
 

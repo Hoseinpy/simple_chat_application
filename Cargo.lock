@@ -1030,11 +1030,13 @@ name = "infra"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "dotenvy",
  "env_logger",
  "log",
  "redis",
  "shared",
  "sqlx",
+ "tokio",
  "uuid",
 ]
 

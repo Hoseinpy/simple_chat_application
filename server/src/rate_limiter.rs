@@ -61,13 +61,13 @@ impl RateLimiter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utils::setup_redis_client;
     use axum::http::{HeaderMap, HeaderValue};
+    use infra::cache::get_redis_client;
     use std::sync::Arc;
 
-    #[test]
-    fn test_create_new_instatnce() {
-        let redis_client = setup_redis_client();
+    #[tokio::test]
+    async fn test_create_new_instance() {
+        let redis_client = Arc::new(get_redis_client().unwrap());
 
         let key = "rate_limiter:127.0.0.1".to_string();
         let rate_limiter = RateLimiter::new(key.clone(), 10, 60, redis_client);
@@ -78,7 +78,7 @@ mod tests {
     }
     #[tokio::test]
     async fn test_run_cehck_and_apply_with_exist_cache() {
-        let redis_client = setup_redis_client();
+        let redis_client = Arc::new(get_redis_client().unwrap());
 
         let rate_limiter = RateLimiter::new(
             "rate_limiter:127.0.0.2".to_string(),
@@ -111,7 +111,7 @@ mod tests {
     }
     #[tokio::test]
     async fn test_run_cehck_and_apply_with_not_exist_cache() {
-        let redis_client = setup_redis_client();
+        let redis_client = Arc::new(get_redis_client().unwrap());
 
         let rate_limiter = RateLimiter::new(
             "rate_limiter:127.0.0.3".to_string(),
@@ -136,7 +136,7 @@ mod tests {
     }
     #[tokio::test]
     async fn test_run_check_and_apply_value_eq_zero() {
-        let redis_client = setup_redis_client();
+        let redis_client = Arc::new(get_redis_client().unwrap());
 
         let rate_limiter = RateLimiter::new(
             "rate_limiter:127.0.0.4".to_string(),
@@ -172,7 +172,7 @@ mod tests {
             HeaderValue::from_str("127.0.0.5").unwrap(),
         );
 
-        let redis_client = setup_redis_client();
+        let redis_client = Arc::new(get_redis_client().unwrap());
         let mut conn = redis_client
             .get_multiplexed_async_connection()
             .await
