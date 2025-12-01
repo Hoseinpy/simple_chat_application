@@ -49,6 +49,21 @@ impl Room {
 
         Ok(records)
     }
+    pub async fn delete(db_pool: Arc<PgPool>, uuid: Option<Uuid>) -> Result<(), DefaultError> {
+        match uuid {
+            Some(v) => {
+                sqlx::query("DELETE FROM room WHERE uuid = $1")
+                    .bind(v)
+                    .execute(&*db_pool)
+                    .await?;
+            }
+            None => {
+                sqlx::query("DELETE FROM room").execute(&*db_pool).await?;
+            }
+        }
+
+        Ok(())
+    }
 }
 
 #[derive(FromRow)]
@@ -94,5 +109,70 @@ impl Message {
                 .await?;
 
         Ok(records)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Room;
+    use crate::test_utils::get_db_test_pool;
+    use shared::helpers::generate_uuid_v4;
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn test_create_room_not_provide_uuid() {
+        let db_pool = get_db_test_pool().await;
+
+        let record = Room::create(Arc::clone(&db_pool), None).await;
+        assert!(record.is_ok());
+    }
+    #[tokio::test]
+    async fn test_create_room_provide_uuid() {
+        let db_pool = get_db_test_pool().await;
+        let uuid = generate_uuid_v4();
+
+        let record = Room::create(db_pool, Some(uuid.clone())).await;
+        assert!(record.is_ok());
+
+        assert_eq!(record.unwrap().get_uuid(), uuid)
+    }
+    #[tokio::test]
+    async fn test_read_single_room() {
+        let db_pool = get_db_test_pool().await;
+
+        let record = Room::create(Arc::clone(&db_pool), None).await.unwrap();
+
+        let result = Room::read(db_pool, Some(record.get_uuid())).await;
+        assert!(result.is_ok());
+
+        assert_eq!(result.unwrap().len(), 1)
+    }
+    #[tokio::test]
+    async fn test_read_all_rooms() {
+        let db_pool = get_db_test_pool().await;
+
+        Room::create(Arc::clone(&db_pool), None).await.unwrap();
+        Room::create(Arc::clone(&db_pool), None).await.unwrap();
+
+        let results = Room::read(db_pool, None).await;
+        assert!(results.is_ok());
+
+        assert!(results.unwrap().len() > 1)
+    }
+    #[tokio::test]
+    async fn test_delete_one_record() {
+        let db_pool = get_db_test_pool().await;
+
+        let record = Room::create(Arc::clone(&db_pool), None).await.unwrap();
+
+        let result = Room::delete(db_pool, Some(record.get_uuid())).await;
+        assert!(result.is_ok())
+    }
+    #[tokio::test]
+    async fn test_delete_all_records() {
+        let db_pool = get_db_test_pool().await;
+
+        let result = Room::delete(db_pool, None).await;
+        assert!(result.is_ok())
     }
 }

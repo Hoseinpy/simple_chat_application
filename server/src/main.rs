@@ -13,6 +13,9 @@ mod handlers;
 mod rate_limiter;
 mod utils;
 
+#[cfg(test)]
+mod test_utils;
+
 #[tokio::main]
 async fn main() {
     dotenv().ok();

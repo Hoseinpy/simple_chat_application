@@ -57,3 +57,120 @@ impl RateLimiter {
         rate_limiter.check_and_apply().await.unwrap_or(true)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::RateLimiter;
+    use crate::test_utils::get_redis_test_client;
+    use axum::http::{HeaderMap, HeaderValue};
+    use redis::AsyncCommands;
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn test_create_new_instance() {
+        let redis_client = get_redis_test_client().await;
+        let default_key = "rate_limiter:127.0.0.1";
+        let rate_limiter = RateLimiter::new(default_key.to_string(), 10, 10, redis_client);
+
+        assert_eq!(rate_limiter.key, default_key);
+        assert_eq!(rate_limiter.limit, 10);
+        assert_eq!(rate_limiter.seconds, 10);
+    }
+    #[tokio::test]
+    async fn test_check_and_apply_for_exist_cache() {
+        let redis_client = get_redis_test_client().await;
+        let rate_limiter = RateLimiter::new(
+            "rate_limiter:127.0.0.2".to_string(),
+            10,
+            10,
+            Arc::clone(&redis_client),
+        );
+
+        let mut conn = redis_client
+            .get_multiplexed_async_connection()
+            .await
+            .unwrap();
+        conn.set_ex::<_, _, ()>(
+            &rate_limiter.key,
+            rate_limiter.limit.to_string(),
+            rate_limiter.seconds,
+        )
+        .await
+        .unwrap();
+
+        let result = rate_limiter.check_and_apply().await.unwrap();
+        assert!(result);
+
+        assert_eq!(
+            conn.get::<_, Option<String>>(&rate_limiter.key)
+                .await
+                .unwrap()
+                .unwrap(),
+            "9"
+        );
+    }
+    #[tokio::test]
+    async fn test_check_and_apply_not_exist_cache() {
+        let redis_client = get_redis_test_client().await;
+        let rate_limiter = RateLimiter::new(
+            "rate_limiter:127.0.0.3".to_string(),
+            10,
+            10,
+            Arc::clone(&redis_client),
+        );
+
+        let result = rate_limiter.check_and_apply().await.unwrap();
+        assert!(result);
+
+        let mut conn = redis_client
+            .get_multiplexed_async_connection()
+            .await
+            .unwrap();
+        assert_eq!(
+            conn.get::<_, Option<String>>(&rate_limiter.key)
+                .await
+                .unwrap()
+                .unwrap(),
+            "10"
+        );
+
+        conn.del::<_, ()>(&rate_limiter.key).await.unwrap();
+    }
+    #[tokio::test]
+    async fn test_check_and_apply_for_get_false_result() {
+        let redis_client = get_redis_test_client().await;
+        let rate_limiter = RateLimiter::new(
+            "rate_limiter:127.0.0.4".to_string(),
+            0,
+            10,
+            Arc::clone(&redis_client),
+        );
+
+        let mut conn = redis_client
+            .get_multiplexed_async_connection()
+            .await
+            .unwrap();
+        conn.set_ex::<_, _, ()>(
+            &rate_limiter.key,
+            rate_limiter.limit.to_string(),
+            rate_limiter.seconds,
+        )
+        .await
+        .unwrap();
+
+        let result = rate_limiter.check_and_apply().await.unwrap();
+        assert!(!result);
+    }
+    #[tokio::test]
+    async fn test_run() {
+        let redis_client = get_redis_test_client().await;
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-forwarded-for",
+            HeaderValue::from_str("127.0.0.5").unwrap(),
+        );
+
+        let result = RateLimiter::run(&headers, 10, 10, redis_client).await;
+        assert!(result)
+    }
+}
