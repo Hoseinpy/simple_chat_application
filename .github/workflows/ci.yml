@@ -40,6 +40,7 @@ jobs:
       - name: Run Tests
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          TEST_DATABASE_URL: ${{ secrets.TEST_DATABASE_URL }}
           REDIS_URL: ${{ secrets.REDIS_URL }}
 
         run: cargo test --release
