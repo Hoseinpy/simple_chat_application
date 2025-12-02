@@ -1,18 +1,18 @@
 use std::sync::Arc;
 
 use axum::{
+    Json,
     extract::{
-        ws::{Message as WsMessage, WebSocket},
         Path, State, WebSocketUpgrade,
+        ws::{Message as WsMessage, WebSocket},
     },
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
-    Json,
 };
 use futures_util::{sink::SinkExt, stream::StreamExt};
 use rand::distr::{Alphanumeric, SampleString};
 use redis::AsyncTypedCommands;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use shared::helpers::generate_uuid_v4;
 use tokio::sync::broadcast;
 use uuid::Uuid;
@@ -79,44 +79,53 @@ pub async fn handle_connect_room(
     };
     let mut room_id = 0;
     let cache_key = format!("room:{}", uuid);
+    let standard_err_code = StatusCode::INTERNAL_SERVER_ERROR.into_response();
 
-    match app_state
+    let mut conn = match app_state
         .redis_client
         .get_multiplexed_async_connection()
         .await
     {
-        Ok(mut conn) => match conn.exists(&cache_key).await {
-            Ok(true) => {
-                let c_room =
-                    match Room::create(Arc::clone(&app_state.db_pool), Some(parsed_uuid)).await {
-                        Ok(r) => r,
-                        Err(e) => {
-                            log::error!("failed to check room exists: {e}");
-                            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-                        }
-                    };
-                room_id = c_room.get_id();
-                let _ = conn.del(cache_key).await;
-            }
-            Ok(false) => {
-                if let Ok(r) = Room::read(Arc::clone(&app_state.db_pool), Some(parsed_uuid)).await {
-                    if r.is_empty() {
-                        return StatusCode::NOT_FOUND.into_response();
-                    } else {
-                        room_id = r[0].get_id()
-                    }
-                }
-            }
-            Err(e) => {
-                log::error!("failed to check room exists: {e}");
-                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-            }
-        },
+        Ok(v) => v,
         Err(e) => {
             log::error!("failed to open redis connection: {e}");
-            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+            return standard_err_code;
+        }
+    };
+    let cache_exits = match conn.exists(&cache_key).await {
+        Ok(v) => v,
+        Err(e) => {
+            log::error!("failed to check room exists: {e}");
+            return standard_err_code;
+        }
+    };
+    let mut tx = match app_state.db_pool.begin().await {
+        Ok(v) => v,
+        Err(e) => {
+            log::error!("failed to start db tx: {e}");
+            return standard_err_code;
+        }
+    };
+
+    if cache_exits {
+        match Room::create(&mut tx, Some(parsed_uuid)).await {
+            Ok(room) => {
+                room_id = room.get_id();
+            }
+            Err(e) => {
+                log::error!("failed to create room: {e}");
+                return standard_err_code;
+            }
+        }
+        let _ = conn.del(cache_key).await;
+    } else if let Ok(r) = Room::read(&mut tx, Some(parsed_uuid)).await {
+        if r.is_empty() {
+            return StatusCode::NOT_FOUND.into_response();
+        } else {
+            room_id = r[0].get_id()
         }
     }
+    let _ = tx.commit().await;
 
     ws.on_upgrade(move |socket| connect_room(socket, parsed_uuid, app_state, room_id, headers))
 }
@@ -148,7 +157,15 @@ async fn connect_room(
     // setup
     let _ = socket_send.send(WsMessage::Text("Connected".into())).await;
     let _ = tx.send(Json(Value::String(join_message)));
-    for message in Message::read(Arc::clone(&app_state.db_pool), room_id, 100)
+    let mut db_tx = match app_state.db_pool.begin().await {
+        Ok(v) => v,
+        Err(e) => {
+            log::error!("failed to start db tx: {e}");
+            return;
+        }
+    };
+
+    for message in Message::read(&mut db_tx, room_id, 100)
         .await
         .unwrap_or(Vec::new())
     {
@@ -156,6 +173,7 @@ async fn connect_room(
             .send(WsMessage::Text(message.get_message().into()))
             .await;
     }
+    let _ = db_tx.commit().await;
 
     let mut send_task = tokio::spawn(async move {
         while let Ok(msg) = rx.recv().await {
@@ -172,21 +190,27 @@ async fn connect_room(
     let mut recv_task = tokio::spawn(async move {
         while let Some(Ok(msg)) = socket_recv.next().await {
             if !RateLimiter::run(&headers, 10, 60, Arc::clone(&app_state.redis_client)).await {
-                // let _ = socket_send.send(WsMessage::text(String::from(
-                //     "you are limited. please try after 60 seconds",
-                // )));
                 continue;
             };
             match msg {
                 WsMessage::Text(m) => {
+                    let mut db_tx = match app_state.db_pool.begin().await {
+                        Ok(v) => v,
+                        Err(e) => {
+                            log::error!("failed to start db tx: {e}");
+                            continue;
+                        }
+                    };
                     let message = Json(json!({ "user": random_name, "message": m.to_string() }));
-                    let _ = Message::create(
-                        Arc::clone(&app_state.db_pool),
-                        message.to_string(),
-                        room_id,
-                    )
-                    .await;
-                    let _ = tx.send(message);
+                    let _ = Message::create(&mut db_tx, message.to_string(), room_id).await;
+                    match tx.send(message) {
+                        Ok(_) => {
+                            let _ = db_tx.commit().await;
+                        }
+                        Err(_) => {
+                            let _ = db_tx.rollback().await;
+                        }
+                    }
                 }
                 WsMessage::Close(_) => {
                     let _ = tx.send(Json(Value::String(leave_message.clone())));
@@ -229,11 +253,12 @@ mod tests {
             .unwrap();
         let cache_key = format!("room:{}", response_uuid);
 
-        assert!(conn
-            .get::<_, Option<String>>(&cache_key)
-            .await
-            .unwrap()
-            .is_some());
+        assert!(
+            conn.get::<_, Option<String>>(&cache_key)
+                .await
+                .unwrap()
+                .is_some()
+        );
 
         conn.del::<_, ()>(cache_key).await.unwrap();
         conn.del::<_, ()>("rate_limiter:127.0.0.6").await.unwrap();

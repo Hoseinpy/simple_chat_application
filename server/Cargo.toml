@@ -16,7 +16,7 @@ shared = { path = "../shared" }
 uuid = { version = "1.18.1", features = ["v4"] }
 futures-util = "0.3.31"
 rand = "0.9.2"
-sqlx = { version = "0.8.6", features = ["postgres", "runtime-tokio", "tls-native-tls", "chrono", "uuid"] }
+sqlx = { version = "0.8.6", features = ["postgres", "runtime-tokio", "tls-native-tls", "chrono", "uuid", "sqlite"] }
 
 [dev-dependencies]
 axum-test = { version = "18.3.0", features = ["ws"] }
