@@ -1,6 +1,6 @@
 use axum::{http::StatusCode, response::IntoResponse};
 
-use crate::handlers::ApiResponse;
+use crate::models::ApiResponse;
 
 pub async fn handle_version() -> impl IntoResponse {
     let version = env!("CARGO_PKG_VERSION");

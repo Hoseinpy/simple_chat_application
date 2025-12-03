@@ -1,14 +1,13 @@
 use chrono::NaiveDateTime;
 use shared::{helpers::generate_uuid_v4, types::DefaultError};
-use sqlx::{FromRow, Postgres, Transaction};
+use sqlx::{FromRow, PgPool, Postgres, Transaction};
+use std::sync::Arc;
 use uuid::Uuid;
 
-// TODO: remove allow attribute after use in some place
 #[derive(FromRow)]
 pub struct Room {
     id: i32,
     uuid: Uuid,
-    #[allow(dead_code)]
     created_at: NaiveDateTime,
 }
 
@@ -18,6 +17,9 @@ impl Room {
     }
     pub fn get_uuid(&self) -> Uuid {
         self.uuid
+    }
+    pub fn get_created_at(&self) -> NaiveDateTime {
+        self.created_at
     }
     pub async fn create(
         tx: &mut Transaction<'_, Postgres>,
@@ -35,24 +37,24 @@ impl Room {
         Ok(record)
     }
     pub async fn read(
-        tx: &mut Transaction<'_, Postgres>,
+        tx: Option<&mut Transaction<'_, Postgres>>,
+        db_pool: Option<Arc<PgPool>>,
         uuid: Option<Uuid>,
     ) -> Result<Vec<Room>, DefaultError> {
-        let records = match uuid {
-            Some(v) => {
-                sqlx::query_as::<_, Room>("SELECT * FROM room WHERE uuid = $1")
-                    .bind(v)
-                    .fetch_all(&mut **tx)
-                    .await?
-            }
-            None => {
-                sqlx::query_as::<_, Room>("SELECT * FROM room")
-                    .fetch_all(&mut **tx)
-                    .await?
-            }
+        let query = match uuid {
+            Some(v) => sqlx::query_as::<_, Room>("SELECT * FROM room WHERE uuid = $1").bind(v),
+            None => sqlx::query_as::<_, Room>("SELECT * FROM room"),
         };
 
-        Ok(records)
+        if let Some(t) = tx {
+            let records = query.fetch_all(&mut **t).await?;
+            Ok(records)
+        } else if let Some(d) = db_pool {
+            let records = query.fetch_all(&*d).await?;
+            Ok(records)
+        } else {
+            Ok(Vec::new())
+        }
     }
     pub async fn delete(tx: &mut Transaction<'_, Postgres>, id: i32) -> Result<(), DefaultError> {
         sqlx::query("DELETE FROM room WHERE id = $1")
@@ -65,7 +67,6 @@ impl Room {
 }
 
 #[derive(FromRow)]
-#[allow(dead_code)]
 pub struct Message {
     id: i32,
     room_id: i32,
@@ -83,6 +84,9 @@ impl Message {
     pub fn get_room_id(&self) -> i32 {
         self.room_id
     }
+    pub fn get_created_at(&self) -> NaiveDateTime {
+        self.created_at
+    }
     pub async fn create(
         tx: &mut Transaction<'_, Postgres>,
         message: String,
@@ -98,18 +102,25 @@ impl Message {
         Ok(record)
     }
     pub async fn read(
-        tx: &mut Transaction<'_, Postgres>,
+        tx: Option<&mut Transaction<'_, Postgres>>,
+        db_pool: Option<Arc<PgPool>>,
         room_id: i32,
         limit: i32,
     ) -> Result<Vec<Message>, DefaultError> {
-        let records =
+        let query =
             sqlx::query_as::<_, Message>("SELECT * FROM message WHERE room_id = $1 LIMIT $2")
                 .bind(room_id)
-                .bind(limit)
-                .fetch_all(&mut **tx)
-                .await?;
+                .bind(limit);
 
-        Ok(records)
+        if let Some(t) = tx {
+            let records = query.fetch_all(&mut **t).await?;
+            Ok(records)
+        } else if let Some(d) = db_pool {
+            let records = query.fetch_all(&*d).await?;
+            Ok(records)
+        } else {
+            Ok(Vec::new())
+        }
     }
     pub async fn delete(tx: &mut Transaction<'_, Postgres>, id: i32) -> Result<(), DefaultError> {
         sqlx::query("DELETE FROM message WHERE id = $1")
@@ -158,7 +169,7 @@ mod tests {
 
         let record = Room::create(&mut tx, None).await.unwrap();
 
-        let result = Room::read(&mut tx, Some(record.get_uuid())).await;
+        let result = Room::read(Some(&mut tx), None, Some(record.get_uuid())).await;
         assert!(result.is_ok());
 
         assert_eq!(result.unwrap().len(), 1);
@@ -173,7 +184,7 @@ mod tests {
         for _ in 0..=2 {
             Room::create(&mut tx, None).await.unwrap();
         }
-        let results = Room::read(&mut tx, None).await;
+        let results = Room::read(Some(&mut tx), None, None).await;
         assert!(results.is_ok());
 
         assert!(results.unwrap().len() > 1);
@@ -214,7 +225,7 @@ mod tests {
             .await
             .unwrap();
 
-        let record = Message::read(&mut tx, some_room_id, 10).await;
+        let record = Message::read(Some(&mut tx), None, some_room_id, 10).await;
         assert!(record.is_ok());
         assert_eq!(record.unwrap().len(), 1);
 
@@ -233,7 +244,7 @@ mod tests {
                 .unwrap();
         }
 
-        let record = Message::read(&mut tx, some_room_id, 10).await;
+        let record = Message::read(Some(&mut tx), None, some_room_id, 10).await;
         assert!(record.is_ok());
         assert!(record.unwrap().len() > 1);
 

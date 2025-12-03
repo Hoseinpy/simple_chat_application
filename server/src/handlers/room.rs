@@ -1,24 +1,24 @@
 use std::sync::Arc;
 
 use axum::{
-    Json,
     extract::{
-        Path, State, WebSocketUpgrade,
         ws::{Message as WsMessage, WebSocket},
+        Path, State, WebSocketUpgrade,
     },
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
+    Json,
 };
 use futures_util::{sink::SinkExt, stream::StreamExt};
 use rand::distr::{Alphanumeric, SampleString};
 use redis::AsyncTypedCommands;
-use serde_json::{Value, json};
-use shared::helpers::generate_uuid_v4;
+use serde_json::{json, Value};
+use shared::{helpers::generate_uuid_v4, models::AppState};
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
 use crate::{
-    handlers::{ApiResponse, AppState},
+    models::{ApiResponse, RoomResponse},
     rate_limiter::RateLimiter,
 };
 use infra::db::models::{Message, Room};
@@ -28,39 +28,33 @@ pub async fn handle_create_room(
     headers: HeaderMap,
 ) -> impl IntoResponse {
     if !RateLimiter::run(&headers, 10, 600, Arc::clone(&app_state.redis_client)).await {
-        return ApiResponse::build(
-            false,
-            "To Many Requests".to_string(),
-            StatusCode::TOO_MANY_REQUESTS,
-        );
+        return ApiResponse::build(false, String::new(), StatusCode::TOO_MANY_REQUESTS);
     }
 
     let room_uuid = generate_uuid_v4().to_string();
-
-    match app_state
+    let mut conn = match app_state
         .redis_client
         .get_multiplexed_async_connection()
         .await
     {
-        Ok(mut conn) => {
-            let _ = conn
-                .set_ex(
-                    format!("room:{}", room_uuid).as_str(),
-                    room_uuid.clone(),
-                    3600,
-                )
-                .await;
-            ApiResponse::build(true, room_uuid, StatusCode::OK)
-        }
+        Ok(c) => c,
         Err(e) => {
             log::error!("failed to open redis connection: {e}");
-            ApiResponse::build(
+            return ApiResponse::build(
                 false,
                 "failed to create room".into(),
                 StatusCode::INTERNAL_SERVER_ERROR,
-            )
+            );
         }
-    }
+    };
+    let _ = conn
+        .set_ex(
+            format!("room:{}", room_uuid).as_str(),
+            room_uuid.clone(),
+            3600,
+        )
+        .await;
+    ApiResponse::build(true, room_uuid, StatusCode::OK)
 }
 
 // TODO: write some test for this endpoint
@@ -95,7 +89,7 @@ pub async fn handle_connect_room(
     let cache_exits = match conn.exists(&cache_key).await {
         Ok(v) => v,
         Err(e) => {
-            log::error!("failed to check room exists: {e}");
+            log::error!("failed to check room cache exists: {e}");
             return standard_err_code;
         }
     };
@@ -118,19 +112,24 @@ pub async fn handle_connect_room(
             }
         }
         let _ = conn.del(cache_key).await;
-    } else if let Ok(r) = Room::read(&mut tx, Some(parsed_uuid)).await {
+        let _ = tx.commit().await;
+    } else if let Ok(r) = Room::read(
+        None,
+        Some(Arc::clone(&app_state.db_pool)),
+        Some(parsed_uuid),
+    )
+    .await
+    {
         if r.is_empty() {
             return StatusCode::NOT_FOUND.into_response();
         } else {
             room_id = r[0].get_id()
         }
     }
-    let _ = tx.commit().await;
 
     ws.on_upgrade(move |socket| connect_room(socket, parsed_uuid, app_state, room_id, headers))
 }
 
-// TODO: refactor it
 async fn connect_room(
     socket: WebSocket,
     uuid: Uuid,
@@ -154,18 +153,10 @@ async fn connect_room(
     let join_message = format!("user {} joined to room", &random_name);
     let leave_message = format!("user {} leave the room", &random_name);
 
-    // setup
     let _ = socket_send.send(WsMessage::Text("Connected".into())).await;
     let _ = tx.send(Json(Value::String(join_message)));
-    let mut db_tx = match app_state.db_pool.begin().await {
-        Ok(v) => v,
-        Err(e) => {
-            log::error!("failed to start db tx: {e}");
-            return;
-        }
-    };
 
-    for message in Message::read(&mut db_tx, room_id, 100)
+    for message in Message::read(None, Some(Arc::clone(&app_state.db_pool)), room_id, 100)
         .await
         .unwrap_or(Vec::new())
     {
@@ -173,7 +164,6 @@ async fn connect_room(
             .send(WsMessage::Text(message.get_message().into()))
             .await;
     }
-    let _ = db_tx.commit().await;
 
     let mut send_task = tokio::spawn(async move {
         while let Ok(msg) = rx.recv().await {
@@ -214,6 +204,10 @@ async fn connect_room(
                 }
                 WsMessage::Close(_) => {
                     let _ = tx.send(Json(Value::String(leave_message.clone())));
+                    if tx.receiver_count() == 1 {
+                        app_state.channels.lock().await.remove(&uuid);
+                        break;
+                    }
                 }
                 _ => (),
             }
@@ -223,7 +217,38 @@ async fn connect_room(
     tokio::select! {
         _ = &mut send_task => recv_task.abort(),
         _ = &mut recv_task => send_task.abort(),
+    };
+}
+
+// TODO: replace domain with real one
+pub async fn handle_rooms_list(
+    State(app_state): State<AppState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if !RateLimiter::run(&headers, 10, 60, app_state.redis_client).await {
+        return ApiResponse::build(false, Vec::new(), StatusCode::TOO_MANY_REQUESTS);
     }
+
+    let mut rooms = Vec::new();
+    {
+        let channels = app_state.channels.lock().await;
+
+        rooms.reserve(channels.len());
+
+        for (uuid, tx) in channels.iter() {
+            let room_size = tx.receiver_count();
+
+            rooms.push(RoomResponse::new(
+                uuid.to_string(),
+                room_size,
+                format!("ws://domain.com/room/{}", uuid),
+            ));
+        }
+    }
+
+    rooms.sort_unstable_by(|a, b| b.room_size.cmp(&a.room_size));
+
+    ApiResponse::build(true, rooms, StatusCode::OK)
 }
 
 #[cfg(test)]
@@ -253,12 +278,11 @@ mod tests {
             .unwrap();
         let cache_key = format!("room:{}", response_uuid);
 
-        assert!(
-            conn.get::<_, Option<String>>(&cache_key)
-                .await
-                .unwrap()
-                .is_some()
-        );
+        assert!(conn
+            .get::<_, Option<String>>(&cache_key)
+            .await
+            .unwrap()
+            .is_some());
 
         conn.del::<_, ()>(cache_key).await.unwrap();
         conn.del::<_, ()>("rate_limiter:127.0.0.6").await.unwrap();
@@ -280,6 +304,41 @@ mod tests {
         let response = server
             .post("/room/create")
             .add_header("x-forwarded-for", "127.0.0.7")
+            .await;
+        assert_eq!(response.status_code(), 429);
+    }
+    #[tokio::test]
+    async fn test_handle_rooms_list() {
+        let server = get_test_server().await;
+
+        let response = server
+            .get("/room/list")
+            .add_header("x-forwarded-for", "127.0.0.8")
+            .await;
+        assert_eq!(response.status_code(), 200);
+
+        assert_eq!(
+            response.json::<Value>()["data"].as_array().unwrap().len(),
+            0
+        )
+    }
+    #[tokio::test]
+    async fn test_handle_rooms_list_return_429() {
+        let server = get_test_server().await;
+
+        let redis_client = get_redis_test_client().await;
+        let mut conn = redis_client
+            .get_multiplexed_async_connection()
+            .await
+            .unwrap();
+
+        conn.set_ex::<_, _, ()>("rate_limiter:127.0.0.9", "0", 10)
+            .await
+            .unwrap();
+
+        let response = server
+            .get("/room/list")
+            .add_header("x-forwarded-for", "127.0.0.9")
             .await;
         assert_eq!(response.status_code(), 429);
     }

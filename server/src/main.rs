@@ -1,5 +1,3 @@
-// TODO: remove unused crates in cargo.tom
-
 use std::{collections::HashMap, process, sync::Arc};
 
 use dotenvy::dotenv;
@@ -10,6 +8,7 @@ use tokio::{net::TcpListener, sync::Mutex};
 use crate::handlers::init_app;
 
 mod handlers;
+mod models;
 mod rate_limiter;
 mod utils;
 

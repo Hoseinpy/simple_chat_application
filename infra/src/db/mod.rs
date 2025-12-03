@@ -13,8 +13,7 @@ pub async fn create_pool() -> Result<PgPool, DefaultError> {
     } else {
         ("DATABASE_URL", "DATABASE_URL most be set in .env")
     };
-    let database_url =
-        env::var(var_name).expect(expect_err);
+    let database_url = env::var(var_name).expect(expect_err);
 
     let (min_conn, max_conn) = if is_test_mode { (0, 1) } else { (5, 30) };
     let pool = async || -> Result<PgPool, sqlx::Error> {
