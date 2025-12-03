@@ -8,18 +8,18 @@ pub mod models;
 pub async fn create_pool() -> Result<PgPool, DefaultError> {
     let is_test_mode = cfg!(test);
 
-    let var_name = if is_test_mode {
-        "TEST_DATABASE_URL"
+    let (var_name, expect_err) = if is_test_mode {
+        ("TEST_DATABASE_URL", "TEST_DATABASE_URL most be set in .env")
     } else {
-        "DATABASE_URL"
+        ("DATABASE_URL", "DATABASE_URL most be set in .env")
     };
     let database_url =
-        env::var(var_name).expect("DATABASE_URL and TEST_DATABASE_URL most be set in .env");
+        env::var(var_name).expect(expect_err);
 
-    let min_conn = if is_test_mode { 0 } else { 5 };
-    let pool = async || -> Result<sqlx::Pool<Postgres>, sqlx::Error> {
+    let (min_conn, max_conn) = if is_test_mode { (0, 1) } else { (5, 30) };
+    let pool = async || -> Result<PgPool, sqlx::Error> {
         PgPoolOptions::new()
-            .max_connections(30)
+            .max_connections(max_conn)
             .min_connections(min_conn)
             .acquire_timeout(Duration::from_secs(2))
             .idle_timeout(Duration::from_secs(300))
