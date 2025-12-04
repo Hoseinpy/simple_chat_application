@@ -1,20 +1,23 @@
 use std::sync::Arc;
 
 use axum::{
+    Json,
     extract::{
-        ws::{Message as WsMessage, WebSocket},
         Path, State, WebSocketUpgrade,
+        ws::{Message as WsMessage, WebSocket},
     },
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
-    Json,
 };
-use futures_util::{sink::SinkExt, stream::StreamExt};
+use futures_util::{
+    sink::SinkExt,
+    stream::{SplitSink, SplitStream, StreamExt},
+};
 use rand::distr::{Alphanumeric, SampleString};
 use redis::AsyncTypedCommands;
-use serde_json::{json, Value};
-use shared::{helpers::generate_uuid_v4, models::AppState};
-use tokio::sync::broadcast;
+use serde_json::{Value, json};
+use shared::{helpers::generate_uuid_v4, models::AppState, types::DefaultError};
+use tokio::sync::broadcast::{self, Sender};
 use uuid::Uuid;
 
 use crate::{
@@ -127,97 +130,167 @@ pub async fn handle_connect_room(
         }
     }
 
-    ws.on_upgrade(move |socket| connect_room(socket, parsed_uuid, app_state, room_id, headers))
+    ws.on_upgrade(move |socket| {
+        ConnectRoomWebSocket::join(socket, (parsed_uuid, room_id), app_state, headers)
+    })
 }
 
-async fn connect_room(
-    socket: WebSocket,
-    uuid: Uuid,
+struct ConnectRoomWebSocket {
+    username: String,
+    room_info: (Uuid, i32),
+    channel_tx: Sender<Json<Value>>,
     app_state: AppState,
-    room_id: i32,
-    headers: HeaderMap,
-) {
-    let (mut socket_send, mut socket_recv) = socket.split();
-    let tx = {
-        let mut map = app_state.channels.lock().await;
-        map.entry(uuid)
-            .or_insert_with(|| broadcast::channel(100).0)
-            .clone()
-    };
-    let mut rx = tx.subscribe();
+}
 
-    let random_name = format!(
-        "anonymous_{}",
-        Alphanumeric.sample_string(&mut rand::rng(), 10)
-    );
-    let join_message = format!("user {} joined to room", &random_name);
-    let leave_message = format!("user {} leave the room", &random_name);
+impl ConnectRoomWebSocket {
+    async fn join(
+        socket: WebSocket,
+        room_info: (Uuid, i32),
+        app_state: AppState,
+        headers: HeaderMap,
+    ) {
+        let (mut socket_send, socket_recv) = socket.split();
+        let username = format!(
+            "anonymous_{}",
+            Alphanumeric.sample_string(&mut rand::rng(), 10)
+        );
+        let channel_tx = {
+            let mut map = app_state.channels.lock().await;
+            map.entry(room_info.0)
+                .or_insert_with(|| broadcast::channel(100).0)
+                .clone()
+        };
 
-    let _ = socket_send.send(WsMessage::Text("Connected".into())).await;
-    let _ = tx.send(Json(Value::String(join_message)));
+        let mut connect_room_web_socket = Self {
+            username,
+            room_info,
+            channel_tx,
+            app_state,
+        };
 
-    for message in Message::read(None, Some(Arc::clone(&app_state.db_pool)), room_id, 100)
-        .await
-        .unwrap_or(Vec::new())
-    {
-        let _ = socket_send
-            .send(WsMessage::Text(message.get_message().into()))
+        connect_room_web_socket
+            .send_info(&mut socket_send)
+            .await
+            .unwrap_or(());
+        connect_room_web_socket
+            .load_previous_messages(&mut socket_send)
+            .await
+            .unwrap_or(());
+        connect_room_web_socket
+            .process(socket_send, socket_recv, headers)
             .await;
     }
 
-    let mut send_task = tokio::spawn(async move {
-        while let Ok(msg) = rx.recv().await {
-            if socket_send
-                .send(WsMessage::text(msg.to_string()))
-                .await
-                .is_err()
-            {
-                break;
-            }
-        }
-    });
+    async fn send_info(
+        &mut self,
+        socket_send: &mut SplitSink<WebSocket, WsMessage>,
+    ) -> Result<(), DefaultError> {
+        socket_send
+            .send(WsMessage::Text("Connected".into()))
+            .await?;
+        self.channel_tx.send(Json(Value::String(format!(
+            "user {} joined to room",
+            self.username
+        ))))?;
 
-    let mut recv_task = tokio::spawn(async move {
-        while let Some(Ok(msg)) = socket_recv.next().await {
-            if !RateLimiter::run(&headers, 10, 60, Arc::clone(&app_state.redis_client)).await {
-                continue;
-            };
-            match msg {
-                WsMessage::Text(m) => {
-                    let mut db_tx = match app_state.db_pool.begin().await {
-                        Ok(v) => v,
-                        Err(e) => {
-                            log::error!("failed to start db tx: {e}");
-                            continue;
-                        }
-                    };
-                    let message = Json(json!({ "user": random_name, "message": m.to_string() }));
-                    let _ = Message::create(&mut db_tx, message.to_string(), room_id).await;
-                    match tx.send(message) {
-                        Ok(_) => {
-                            let _ = db_tx.commit().await;
-                        }
-                        Err(_) => {
-                            let _ = db_tx.rollback().await;
+        Ok(())
+    }
+
+    async fn load_previous_messages(
+        &mut self,
+        socket_send: &mut SplitSink<WebSocket, WsMessage>,
+    ) -> Result<(), DefaultError> {
+        for message in Message::read(
+            None,
+            Some(Arc::clone(&self.app_state.db_pool)),
+            self.room_info.1,
+            200,
+        )
+        .await
+        .unwrap_or(Vec::new())
+        {
+            socket_send
+                .send(WsMessage::Text(message.get_message().into()))
+                .await?
+        }
+        Ok(())
+    }
+
+    async fn process(
+        &mut self,
+        mut socket_send: SplitSink<WebSocket, WsMessage>,
+        mut socket_recv: SplitStream<WebSocket>,
+        headers: HeaderMap,
+    ) {
+        let mut channel_rx = self.channel_tx.subscribe();
+
+        let app_state = self.app_state.clone();
+        let username = self.username.clone();
+        let room_info = self.room_info;
+        let channel_tx = self.channel_tx.clone();
+
+        let mut send_task = tokio::spawn(async move {
+            while let Ok(message) = channel_rx.recv().await {
+                if socket_send
+                    .send(WsMessage::text(message.to_string()))
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+
+        let mut recv_task = tokio::spawn(async move {
+            while let Some(Ok(message)) = socket_recv.next().await {
+                // TODO: notify user in limited
+                if !RateLimiter::run(&headers, 10, 60, Arc::clone(&app_state.redis_client)).await {
+                    continue;
+                };
+
+                match message {
+                    WsMessage::Text(m) => {
+                        let mut db_tx = match app_state.db_pool.begin().await {
+                            Ok(v) => v,
+                            Err(e) => {
+                                log::error!("failed to start db tx: {e}");
+                                continue;
+                            }
+                        };
+                        let parse_message =
+                            Json(json!({ "user": username, "message": m.to_string() }));
+                        let _ = Message::create(&mut db_tx, parse_message.to_string(), room_info.1)
+                            .await;
+
+                        match channel_tx.send(parse_message) {
+                            Ok(_) => {
+                                let _ = db_tx.commit().await;
+                            }
+                            Err(_) => {
+                                let _ = db_tx.rollback().await;
+                            }
                         }
                     }
-                }
-                WsMessage::Close(_) => {
-                    let _ = tx.send(Json(Value::String(leave_message.clone())));
-                    if tx.receiver_count() == 1 {
-                        app_state.channels.lock().await.remove(&uuid);
+                    WsMessage::Close(_) => {
+                        let _ = channel_tx.send(Json(Value::String(format!(
+                            "user {} leave the room",
+                            username
+                        ))));
+                        if channel_tx.receiver_count() == 1 {
+                            app_state.channels.lock().await.remove(&room_info.0);
+                        }
                         break;
                     }
+                    _ => (),
                 }
-                _ => (),
             }
-        }
-    });
+        });
 
-    tokio::select! {
-        _ = &mut send_task => recv_task.abort(),
-        _ = &mut recv_task => send_task.abort(),
-    };
+        tokio::select! {
+            _ = &mut send_task => recv_task.abort(),
+            _ = &mut recv_task => send_task.abort(),
+        };
+    }
 }
 
 // TODO: replace domain with real one
@@ -278,11 +351,12 @@ mod tests {
             .unwrap();
         let cache_key = format!("room:{}", response_uuid);
 
-        assert!(conn
-            .get::<_, Option<String>>(&cache_key)
-            .await
-            .unwrap()
-            .is_some());
+        assert!(
+            conn.get::<_, Option<String>>(&cache_key)
+                .await
+                .unwrap()
+                .is_some()
+        );
 
         conn.del::<_, ()>(cache_key).await.unwrap();
         conn.del::<_, ()>("rate_limiter:127.0.0.6").await.unwrap();

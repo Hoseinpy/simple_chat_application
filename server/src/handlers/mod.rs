@@ -1,6 +1,6 @@
 use axum::{
-    routing::{any, get, post},
     Router,
+    routing::{any, get, post},
 };
 use shared::models::AppState;
 
