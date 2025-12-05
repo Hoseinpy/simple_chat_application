@@ -4,6 +4,7 @@ use shared::types::DefaultError;
 use sqlx::{PgPool, Postgres, migrate::MigrateDatabase, postgres::PgPoolOptions};
 
 pub mod models;
+pub mod queries;
 
 pub async fn create_pool() -> Result<PgPool, DefaultError> {
     let is_test_mode = cfg!(test);

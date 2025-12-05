@@ -4,7 +4,10 @@ use sqlx::{FromRow, PgPool, Postgres, Transaction};
 use std::sync::Arc;
 use uuid::Uuid;
 
+use crate::db::queries::{Binds, delete, fetch, insert};
+
 #[derive(FromRow)]
+#[allow(dead_code)]
 pub struct Room {
     id: i32,
     uuid: Uuid,
@@ -18,9 +21,6 @@ impl Room {
     pub fn get_uuid(&self) -> Uuid {
         self.uuid
     }
-    pub fn get_created_at(&self) -> NaiveDateTime {
-        self.created_at
-    }
     pub async fn create(
         tx: &mut Transaction<'_, Postgres>,
         uuid: Option<Uuid>,
@@ -29,10 +29,12 @@ impl Room {
             Some(v) => v,
             None => generate_uuid_v4(),
         };
-        let record = sqlx::query_as::<_, Room>("INSERT INTO room (uuid) VALUES ($1) RETURNING *")
-            .bind(uuid)
-            .fetch_one(&mut **tx)
-            .await?;
+        let record = insert(
+            "INSERT INTO room (uuid) VALUES ($1) RETURNING *",
+            vec![Binds::Uuid(uuid)],
+            tx,
+        )
+        .await?;
 
         Ok(record)
     }
@@ -41,32 +43,32 @@ impl Room {
         db_pool: Option<Arc<PgPool>>,
         uuid: Option<Uuid>,
     ) -> Result<Vec<Room>, DefaultError> {
-        let query = match uuid {
-            Some(v) => sqlx::query_as::<_, Room>("SELECT * FROM room WHERE uuid = $1").bind(v),
-            None => sqlx::query_as::<_, Room>("SELECT * FROM room"),
-        };
-
-        if let Some(t) = tx {
-            let records = query.fetch_all(&mut **t).await?;
-            Ok(records)
-        } else if let Some(d) = db_pool {
-            let records = query.fetch_all(&*d).await?;
-            Ok(records)
-        } else {
-            Ok(Vec::new())
+        match uuid {
+            Some(v) => {
+                let records = fetch(
+                    "SELECT * FROM room WHERE uuid = $1",
+                    vec![Binds::Uuid(v)],
+                    tx,
+                    db_pool,
+                )
+                .await?;
+                Ok(records)
+            }
+            None => {
+                let records = fetch("SELECT * FROM room", vec![], tx, db_pool).await?;
+                Ok(records)
+            }
         }
     }
     pub async fn delete(tx: &mut Transaction<'_, Postgres>, id: i32) -> Result<(), DefaultError> {
-        sqlx::query("DELETE FROM room WHERE id = $1")
-            .bind(id)
-            .execute(&mut **tx)
-            .await?;
+        delete::<Room>("DELETE FROM room WHERE id = $1", vec![Binds::I32(id)], tx).await?;
 
         Ok(())
     }
 }
 
 #[derive(FromRow)]
+#[allow(dead_code)]
 pub struct Message {
     id: i32,
     room_id: i32,
@@ -81,23 +83,16 @@ impl Message {
     pub fn get_message(&self) -> String {
         self.message.clone()
     }
-    pub fn get_room_id(&self) -> i32 {
-        self.room_id
-    }
-    pub fn get_created_at(&self) -> NaiveDateTime {
-        self.created_at
-    }
     pub async fn create(
         tx: &mut Transaction<'_, Postgres>,
         message: String,
         room_id: i32,
     ) -> Result<Message, DefaultError> {
-        let record = sqlx::query_as::<_, Message>(
+        let record = insert(
             "INSERT INTO message (message, room_id) VALUES ($1, $2) RETURNING *",
+            vec![Binds::String(message), Binds::I32(room_id)],
+            tx,
         )
-        .bind(message)
-        .bind(room_id)
-        .fetch_one(&mut **tx)
         .await?;
         Ok(record)
     }
@@ -107,26 +102,22 @@ impl Message {
         room_id: i32,
         limit: i32,
     ) -> Result<Vec<Message>, DefaultError> {
-        let query =
-            sqlx::query_as::<_, Message>("SELECT * FROM message WHERE room_id = $1 LIMIT $2")
-                .bind(room_id)
-                .bind(limit);
-
-        if let Some(t) = tx {
-            let records = query.fetch_all(&mut **t).await?;
-            Ok(records)
-        } else if let Some(d) = db_pool {
-            let records = query.fetch_all(&*d).await?;
-            Ok(records)
-        } else {
-            Ok(Vec::new())
-        }
+        let records = fetch(
+            "SELECT * FROM message WHERE room_id = $1 LIMIT $2",
+            vec![Binds::I32(room_id), Binds::I32(limit)],
+            tx,
+            db_pool,
+        )
+        .await?;
+        Ok(records)
     }
     pub async fn delete(tx: &mut Transaction<'_, Postgres>, id: i32) -> Result<(), DefaultError> {
-        sqlx::query("DELETE FROM message WHERE id = $1")
-            .bind(id)
-            .execute(&mut **tx)
-            .await?;
+        delete::<Message>(
+            "DELETE FROM message WHERE id = $1",
+            vec![Binds::I32(id)],
+            tx,
+        )
+        .await?;
 
         Ok(())
     }

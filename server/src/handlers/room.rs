@@ -9,6 +9,7 @@ use axum::{
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
 };
+use chrono::Utc;
 use futures_util::{
     sink::SinkExt,
     stream::{SplitSink, SplitStream, StreamExt},
@@ -167,7 +168,6 @@ impl ConnectRoomWebSocket {
             channel_tx,
             app_state,
         };
-
         connect_room_web_socket
             .send_info(&mut socket_send)
             .await
@@ -257,8 +257,9 @@ impl ConnectRoomWebSocket {
                                 continue;
                             }
                         };
-                        let parse_message =
-                            Json(json!({ "user": username, "message": m.to_string() }));
+                        let parse_message = Json(
+                            json!({ "user": username, "message": m.to_string(), "created_at": Utc::now().to_rfc2822() }),
+                        );
                         let _ = Message::create(&mut db_tx, parse_message.to_string(), room_info.1)
                             .await;
 
